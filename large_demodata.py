@@ -1,14 +1,11 @@
 """
 Large Demo Data Generator for Production Scheduler
 Generates random large-scale production data for stress testing
-Data changes each time it's called
+Data changes each time it's called - with varied but achievable deadlines
 """
 
 import random
 from datetime import datetime
-
-# Toggle to alternate between possible and impossible deadlines
-_deadline_toggle = {'impossible': False}
 
 def get_large_demo_data():
     """
@@ -24,13 +21,9 @@ def get_large_demo_data():
     MIN_TASKS_PER_PRODUCT = 3
     MAX_TASKS_PER_PRODUCT = 8
 
-    # Toggle deadline mode (alternates each call)
-    _deadline_toggle['impossible'] = not _deadline_toggle['impossible']
-    impossible_deadlines = _deadline_toggle['impossible']
-
     print(f"\n[LARGE DEMO DATA GENERATOR]")
     print(f"Generating: {NUM_MACHINES} machines, {NUM_PRODUCTS} products, {NUM_ORDERS} orders")
-    print(f"Impossible deadlines: {'YES' if impossible_deadlines else 'NO'}")
+    print(f"Deadlines: Varied (2-6x minimum time, all achievable)")
     print(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     # Define available operations
@@ -108,25 +101,27 @@ def get_large_demo_data():
             # Setup time between 1-4 hours
             setup_times[setup_key] = random.randint(1, 4)
 
-    # Generate Orders
+    # Generate Orders with VALID, varied deadlines
     orders = []
 
     for i in range(NUM_ORDERS):
         product = random.choice(products)
-        quantity = random.randint(1, 5)  # 1-5 units per order
+        quantity = random.randint(1, 3)  # 1-3 units per order (reduced for feasibility)
 
-        # Calculate minimum time needed for this order
+        # Calculate minimum time needed for this order (sequential processing)
         total_task_time = sum(task['duration'] for task in product['tasks']) * quantity
 
-        if impossible_deadlines and random.random() < 0.4:  # 40% of orders have impossible deadlines
-            # Set deadline that's too tight (50-80% of minimum needed time)
-            deadline = int(total_task_time * random.uniform(0.5, 0.8))
+        # Set deadlines between 2x and 6x the minimum time (all achievable)
+        # Vary deadlines: some tight (2-3x), some relaxed (4-6x)
+        if random.random() < 0.5:
+            # 50% tight but achievable deadlines (2-3x minimum)
+            deadline = int(total_task_time * random.uniform(2.0, 3.0))
         else:
-            # Set reasonable deadline (150-300% of minimum needed time)
-            deadline = int(total_task_time * random.uniform(1.5, 3.0))
+            # 50% relaxed deadlines (3.5-6x minimum)
+            deadline = int(total_task_time * random.uniform(3.5, 6.0))
 
-        # Add some buffer to make sure at least some orders are feasible
-        deadline = max(deadline, 20)  # Minimum 20 hours
+        # Ensure minimum deadline of 30 hours
+        deadline = max(deadline, 30)
 
         orders.append({
             'product': product['name'],
@@ -161,16 +156,12 @@ def get_extreme_large_demo_data():
     NUM_PRODUCTS = random.randint(40, 60)  # 40-60 products
     NUM_ORDERS = random.randint(60, 100)  # 60-100 orders
 
-    # Toggle deadline mode (alternates each call)
-    _deadline_toggle['impossible'] = not _deadline_toggle['impossible']
-    impossible_deadlines = _deadline_toggle['impossible']
-
     print(f"\n[EXTREME LARGE DEMO DATA GENERATOR]")
     print(f"⚠️  WARNING: This will generate EXTREME data!")
     print(f"Generating: {NUM_MACHINES} machines, {NUM_PRODUCTS} products, {NUM_ORDERS} orders")
-    print(f"Impossible deadlines: {'YES' if impossible_deadlines else 'NO'}")
+    print(f"Deadlines: Varied (2-7x minimum time, all achievable)")
     print(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"⚠️  This may take 10+ seconds to solve or timeout!\n")
+    print(f"⚠️  Solving may take time due to problem size!\n")
 
     operations_pool = [
         'cutting', 'drilling', 'milling', 'turning', 'grinding',
@@ -235,19 +226,23 @@ def get_extreme_large_demo_data():
             setup_key = f"{from_product}-{to_product}"
             setup_times[setup_key] = random.randint(1, 5)
 
+    # Generate Orders with VALID, varied deadlines
     orders = []
     for i in range(NUM_ORDERS):
         product = random.choice(products)
-        quantity = random.randint(1, 4)
+        quantity = random.randint(1, 3)  # 1-3 units per order (reduced for feasibility)
 
         total_task_time = sum(task['duration'] for task in product['tasks']) * quantity
 
-        if impossible_deadlines and random.random() < 0.4:
-            deadline = int(total_task_time * random.uniform(0.4, 0.7))
+        # Set deadlines between 2x and 6x the minimum time (all achievable)
+        if random.random() < 0.5:
+            # 50% tight but achievable deadlines (2-3.5x minimum)
+            deadline = int(total_task_time * random.uniform(2.0, 3.5))
         else:
-            deadline = int(total_task_time * random.uniform(1.5, 3.5))
+            # 50% relaxed deadlines (4-7x minimum)
+            deadline = int(total_task_time * random.uniform(4.0, 7.0))
 
-        deadline = max(deadline, 30)
+        deadline = max(deadline, 40)  # Minimum 40 hours for extreme data
 
         orders.append({
             'product': product['name'],

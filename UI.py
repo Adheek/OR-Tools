@@ -251,97 +251,98 @@ with tab5:
                 df = pd.DataFrame(result['schedule'])
                 st.dataframe(df, width="stretch")
 
-                # Create Gantt Chart
-                st.subheader("Gantt Chart Visualization")
+                # Gantt Chart Visualization - Button to generate
+                st.write("---")
+                if st.button("Generate Gantt Chart Visualization", type="secondary", use_container_width=True):
+                    if result['schedule']:
+                        with st.spinner("Generating Gantt chart..."):
+                            # Create Gantt chart using shapes
+                            fig = go.Figure()
 
-                if result['schedule']:
-                    # Create Gantt chart using shapes
-                    fig = go.Figure()
+                            # Color map for products
+                            products_list = list(set([task['order'] for task in result['schedule']]))
+                            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+                                      '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+                            color_map = {product: colors[i % len(colors)] for i, product in enumerate(products_list)}
 
-                    # Color map for products
-                    products_list = list(set([task['order'] for task in result['schedule']]))
-                    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
-                              '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
-                    color_map = {product: colors[i % len(colors)] for i, product in enumerate(products_list)}
+                            # Get unique machines for Y-axis
+                            machines_list = sorted(list(set([task['machine'] for task in result['schedule']])))
+                            machine_to_y = {machine: i for i, machine in enumerate(machines_list)}
 
-                    # Get unique machines for Y-axis
-                    machines_list = sorted(list(set([task['machine'] for task in result['schedule']])))
-                    machine_to_y = {machine: i for i, machine in enumerate(machines_list)}
+                            # Add each task as a rectangle
+                            for task in result['schedule']:
+                                start_dt = datetime.strptime(task['start_datetime'], '%Y-%m-%d %H:%M')
+                                end_dt = datetime.strptime(task['end_datetime'], '%Y-%m-%d %H:%M')
+                                machine_y = machine_to_y[task['machine']]
 
-                    # Add each task as a rectangle
-                    for task in result['schedule']:
-                        start_dt = datetime.strptime(task['start_datetime'], '%Y-%m-%d %H:%M')
-                        end_dt = datetime.strptime(task['end_datetime'], '%Y-%m-%d %H:%M')
-                        machine_y = machine_to_y[task['machine']]
+                                # Add rectangle for task
+                                fig.add_shape(
+                                    type="rect",
+                                    x0=start_dt,
+                                    x1=end_dt,
+                                    y0=machine_y - 0.4,
+                                    y1=machine_y + 0.4,
+                                    fillcolor=color_map[task['order']],
+                                    line=dict(color="black", width=1),
+                                )
 
-                        # Add rectangle for task
-                        fig.add_shape(
-                            type="rect",
-                            x0=start_dt,
-                            x1=end_dt,
-                            y0=machine_y - 0.4,
-                            y1=machine_y + 0.4,
-                            fillcolor=color_map[task['order']],
-                            line=dict(color="black", width=1),
-                        )
+                                # Add text annotation
+                                fig.add_annotation(
+                                    x=start_dt + (end_dt - start_dt) / 2,
+                                    y=machine_y,
+                                    text=f"{task['order']}<br>{task['operation']}",
+                                    showarrow=False,
+                                    font=dict(color="white", size=10),
+                                    xanchor="center",
+                                    yanchor="middle"
+                                )
 
-                        # Add text annotation
-                        fig.add_annotation(
-                            x=start_dt + (end_dt - start_dt) / 2,
-                            y=machine_y,
-                            text=f"{task['order']}<br>{task['operation']}",
-                            showarrow=False,
-                            font=dict(color="white", size=10),
-                            xanchor="center",
-                            yanchor="middle"
-                        )
+                            # Add invisible scatter trace for hover info
+                            for task in result['schedule']:
+                                start_dt = datetime.strptime(task['start_datetime'], '%Y-%m-%d %H:%M')
+                                end_dt = datetime.strptime(task['end_datetime'], '%Y-%m-%d %H:%M')
+                                machine_y = machine_to_y[task['machine']]
+                                mid_time = start_dt + (end_dt - start_dt) / 2
 
-                    # Add invisible scatter trace for hover info
-                    for task in result['schedule']:
-                        start_dt = datetime.strptime(task['start_datetime'], '%Y-%m-%d %H:%M')
-                        end_dt = datetime.strptime(task['end_datetime'], '%Y-%m-%d %H:%M')
-                        machine_y = machine_to_y[task['machine']]
-                        mid_time = start_dt + (end_dt - start_dt) / 2
+                                fig.add_trace(go.Scatter(
+                                    x=[mid_time],
+                                    y=[machine_y],
+                                    mode='markers',
+                                    marker=dict(size=0.1, opacity=0),
+                                    hovertemplate=(
+                                        f"<b>{task['order']}</b><br>"
+                                        f"Machine: {task['machine']}<br>"
+                                        f"Operation: {task['operation']}<br>"
+                                        f"Start: {task['start_datetime']}<br>"
+                                        f"End: {task['end_datetime']}<br>"
+                                        f"Duration: {task['duration']}h<br>"
+                                        f"Setup Time: {task.get('setup_time', 0)}h<br>"
+                                        "<extra></extra>"
+                                    ),
+                                    showlegend=False
+                                ))
 
-                        fig.add_trace(go.Scatter(
-                            x=[mid_time],
-                            y=[machine_y],
-                            mode='markers',
-                            marker=dict(size=0.1, opacity=0),
-                            hovertemplate=(
-                                f"<b>{task['order']}</b><br>"
-                                f"Machine: {task['machine']}<br>"
-                                f"Operation: {task['operation']}<br>"
-                                f"Start: {task['start_datetime']}<br>"
-                                f"End: {task['end_datetime']}<br>"
-                                f"Duration: {task['duration']}h<br>"
-                                f"Setup Time: {task.get('setup_time', 0)}h<br>"
-                                "<extra></extra>"
-                            ),
-                            showlegend=False
-                        ))
+                            fig.update_layout(
+                                title="Production Schedule - Gantt Chart",
+                                xaxis_title="Time",
+                                yaxis_title="Machines",
+                                height=max(400, len(machines_list) * 80),
+                                showlegend=False,
+                                xaxis=dict(
+                                    showgrid=True,
+                                    type='date',
+                                    tickformat='%Y-%m-%d %H:%M'
+                                ),
+                                yaxis=dict(
+                                    showgrid=True,
+                                    tickmode='array',
+                                    tickvals=list(range(len(machines_list))),
+                                    ticktext=machines_list,
+                                    range=[-0.5, len(machines_list) - 0.5]
+                                )
+                            )
 
-                    fig.update_layout(
-                        title="Production Schedule - Gantt Chart",
-                        xaxis_title="Time",
-                        yaxis_title="Machines",
-                        height=max(400, len(machines_list) * 80),
-                        showlegend=False,
-                        xaxis=dict(
-                            showgrid=True,
-                            type='date',
-                            tickformat='%Y-%m-%d %H:%M'
-                        ),
-                        yaxis=dict(
-                            showgrid=True,
-                            tickmode='array',
-                            tickvals=list(range(len(machines_list))),
-                            ticktext=machines_list,
-                            range=[-0.5, len(machines_list) - 0.5]
-                        )
-                    )
-
-                    st.plotly_chart(fig, width="stretch")
+                            st.plotly_chart(fig, use_container_width=True)
 
             else:
                 st.error(f"Status: {result['status']}")

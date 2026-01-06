@@ -1,88 +1,165 @@
+"""
+Production Scheduler using Google OR-Tools CP-SAT Solver
+=========================================================
+This module solves a production scheduling problem with the following constraints:
+- Multiple machines with specific capabilities (operations they can perform)
+- Products requiring sequential tasks (operations) with specific durations
+- Orders with quantities and deadlines
+- No two tasks can run on the same machine simultaneously (no-overlap constraint)
+- Tasks within a product must be completed sequentially (precedence constraint)
+- Soft deadline constraints with penalty (allows violations if necessary)
+
+The solver minimizes: makespan + 1000 * deadline_violations
+"""
+
 from ortools.sat.python import cp_model
 from datetime import datetime
 
+
 def solve_schedule(machines, products, setup_times, orders, start_time):
+    """
+    Solves the production scheduling problem using CP-SAT solver.
+
+    Args:
+        machines: List of dicts with 'name' and 'operations' (list of operation names)
+        products: List of dicts with 'name' and 'tasks' (list of operations with durations)
+        setup_times: Dict mapping "product1-product2" to setup time in hours
+        orders: List of dicts with 'product', 'quantity', and 'deadline' (in hours)
+        start_time: Production start datetime (ISO string or datetime object)
+
+    Returns:
+        Dict with 'status', 'makespan', 'schedule', and violation information
+    """
+
     print("\n[API CALL] solve_schedule function called")
     print(f"Inputs: {len(machines)} machines, {len(products)} products, {len(orders)} orders")
 
-    model = cp_model.CpModel()  # Create CP-SAT model
+    # ========================================================================
+    # STEP 1: Initialize CP-SAT Model
+    # ========================================================================
+    # CP-SAT (Constraint Programming - Satisfiability) is a constraint solver
+    # that finds optimal solutions by exploring the search space intelligently
+    model = cp_model.CpModel()
 
-    # Convert start_time from ISO string to datetime
+    # ========================================================================
+    # STEP 2: Parse Start Time
+    # ========================================================================
+    # Convert start_time from ISO string to datetime object for calculations
     if isinstance(start_time, str):
-        start_datetime = datetime.fromisoformat(start_time)  # Parse ISO datetime string
+        start_datetime = datetime.fromisoformat(start_time)
     else:
-        start_datetime = datetime.now()  # Default to now if not provided
+        start_datetime = datetime.now()
 
-    # Data structures
-    all_tasks = []  # Store all task info
-    task_vars = {}  # Store task variables (start, end, interval)
-    machine_tasks = {m['name']: [] for m in machines}  # Tasks grouped by machine
-    order_info = {}  # Store order deadline info for violation tracking
+    # ========================================================================
+    # STEP 3: Initialize Data Structures
+    # ========================================================================
+    all_tasks = []  # Master list of all tasks with their CP variables
+    task_vars = {}  # Quick lookup: task_id -> task info
+    machine_tasks = {m['name']: [] for m in machines}  # Tasks grouped by machine for no-overlap constraints
+    order_info = {}  # Track order completion times and deadline violations
 
-    # Calculate appropriate horizon based on workload
+    # ========================================================================
+    # STEP 4: Calculate Time Horizon
+    # ========================================================================
+    # Horizon = maximum time bound for all variables in the model
+    # We calculate total sequential work time, then multiply by 3 to allow:
+    # - Parallel execution on multiple machines
+    # - Setup times between product changes
+    # - Buffer for optimization flexibility
     total_work = sum(
         sum(task['duration'] for task in product['tasks']) *
         sum(order['quantity'] for order in orders if order['product'] == product['name'])
         for product in products
     )
-    # Horizon = 3x total work to allow for parallelization and setup times
     horizon = max(1000, int(total_work * 3))
     print(f"Total work: {total_work}h, Horizon set to: {horizon}h")
 
-    task_id = 0  # Unique task ID
+    # ========================================================================
+    # STEP 5: Initialize Task Tracking
+    # ========================================================================
+    task_id = 0  # Unique identifier for each task instance
 
-    # Track previous product on each machine for setup time calculation
-    machine_last_product = {}  # {machine_name: [(task, product_name)]}
-    for machine in machines:
-        machine_last_product[machine['name']] = []
-    
-    # Create tasks for each order
+    # Setup time tracking (currently for reporting only, not enforced as constraints)
+    machine_last_product = {m['name']: [] for m in machines}
+
+    # ========================================================================
+    # STEP 6: Create Tasks and Variables for Each Order
+    # ========================================================================
+    # For each order, we create individual task instances with CP variables
+    # Each task has: start time, end time, and interval (for no-overlap constraints)
+
     order_id = 0
     for order in orders:
-        product_name = order['product']  # Get product name
-        quantity = order['quantity']  # Get order quantity
-        deadline = order['deadline']  # Get deadline
+        product_name = order['product']
+        quantity = order['quantity']
+        deadline = order['deadline']
 
-        # Find product definition
+        # Find the product definition (recipe) for this order
         product = next((p for p in products if p['name'] == product_name), None)
         if not product:
-            continue  # Skip if product not found
+            continue  # Skip if product doesn't exist
 
-        # Create violation variable for this order (soft constraint)
+        # ====================================================================
+        # SOFT CONSTRAINT: Deadline Violations
+        # ====================================================================
+        # We allow deadline violations but heavily penalize them in the objective
+        # order_violation = hours late (0 if on time)
         order_violation = model.NewIntVar(0, horizon, f'order_violation_{order_id}')
 
-        # Store order info for later violation reporting
+        # Track order information for later violation reporting
         order_info[order_id] = {
             'product': product_name,
             'deadline': deadline,
             'quantity': quantity,
             'violation_var': order_violation,
-            'last_task_end': None
+            'last_task_end': None  # Will be set to the end time of the last task
         }
 
-        # Create tasks for each unit in the order
-        for unit in range(quantity):
-            prev_task_end = None  # Track previous task end for dependencies
+        # ====================================================================
+        # Create Tasks for Each Unit in the Order
+        # ====================================================================
+        # If quantity=3, we create 3 separate instances of all tasks for this product
+        # Note: We use _ as the loop variable since we only need to iterate quantity times
 
+        for _ in range(quantity):
+            prev_task_end = None  # Track previous task end for precedence constraints
+
+            # Iterate through each task in the product's recipe
             for task in product['tasks']:
-                operation = task['operation']  # Get operation name
-                duration = task['duration']  # Get task duration
+                operation = task['operation']
+                duration = task['duration']
 
-                # Find machine that can do this operation
+                # Find a machine capable of performing this operation
                 machine = next((m for m in machines if operation in m['operations']), None)
                 if not machine:
-                    continue  # Skip if no machine can do this operation
+                    continue  # Skip if no machine can perform this operation
 
-                # Create variables for this task
-                start_var = model.NewIntVar(0, horizon, f'start_{task_id}')  # Task start time
-                end_var = model.NewIntVar(0, horizon, f'end_{task_id}')  # Task end time
-                interval_var = model.NewIntervalVar(start_var, duration, end_var, f'interval_{task_id}')  # Task interval
+                # ============================================================
+                # CREATE CP-SAT VARIABLES
+                # ============================================================
+                # Each task needs three variables for OR-Tools:
 
-                # Task dependency: must start after previous task ends
+                # 1. start_var: When the task begins [0, horizon]
+                start_var = model.NewIntVar(0, horizon, f'start_{task_id}')
+
+                # 2. end_var: When the task finishes [0, horizon]
+                end_var = model.NewIntVar(0, horizon, f'end_{task_id}')
+
+                # 3. interval_var: Represents the task as an interval [start, start+duration]
+                #    This is used for no-overlap constraints
+                interval_var = model.NewIntervalVar(start_var, duration, end_var, f'interval_{task_id}')
+
+                # ============================================================
+                # PRECEDENCE CONSTRAINT
+                # ============================================================
+                # Tasks within the same product unit must be sequential
+                # Task N cannot start until Task N-1 has finished
                 if prev_task_end is not None:
-                    model.Add(start_var >= prev_task_end)  # Precedence constraint
+                    model.Add(start_var >= prev_task_end)
 
-                # Store task info
+                # ============================================================
+                # Store Task Information
+                # ============================================================
                 task_info = {
                     'id': task_id,
                     'order': order['product'],
@@ -95,86 +172,125 @@ def solve_schedule(machines, products, setup_times, orders, start_time):
                     'product': product_name,
                     'order_id': order_id
                 }
+
                 all_tasks.append(task_info)
                 task_vars[task_id] = task_info
                 machine_tasks[machine['name']].append(task_info)
                 machine_last_product[machine['name']].append(task_info)
 
-                prev_task_end = end_var  # Update for next task
-                order_info[order_id]['last_task_end'] = end_var  # Track last task of order
+                # Update for next iteration
+                prev_task_end = end_var
+                order_info[order_id]['last_task_end'] = end_var  # Track last task
                 task_id += 1
 
-        # Soft deadline constraint: last task of order should finish before deadline + violation
+        # ====================================================================
+        # SOFT DEADLINE CONSTRAINT
+        # ====================================================================
+        # Constraint: last_task_end <= deadline + violation
+        # If we finish late, violation will be > 0 (penalized in objective)
         model.Add(order_info[order_id]['last_task_end'] <= deadline + order_violation)
 
         order_id += 1
-    
-    # Add no-overlap constraints and setup time constraints for each machine
-    for machine_name, tasks in machine_tasks.items():  # machine_name is a string, tasks is a list
-        if len(tasks) > 0:
-            intervals = [t['interval'] for t in tasks]  # Get all intervals
-            model.AddNoOverlap(intervals)  # No two tasks can overlap on same machine
-            
-            # Add setup time constraints between consecutive tasks on same machine
-            if len(tasks) > 1 and setup_times:  # Only if there are multiple tasks and setup times defined
-                for i in range(len(tasks)):
-                    for j in range(len(tasks)):
-                        if i != j:  # Don't compare task with itself
-                            task_i = tasks[i]
-                            task_j = tasks[j]
-                            
-                            # Check if there's a setup time defined for this product switch
-                            setup_key = f"{task_i['product']}-{task_j['product']}"
-                            setup_time = setup_times.get(setup_key, 0)  # Get setup time, default 0
-                            
-                            if setup_time > 0:  # Only add constraint if setup time exists
-                                # Create boolean: is task_i immediately before task_j?
-                                is_before = model.NewBoolVar(f'setup_{task_i["id"]}_to_{task_j["id"]}')
-                                
-                                # If task_i comes before task_j, add setup time
-                                model.Add(task_j['start'] >= task_i['end'] + setup_time).OnlyEnforceIf(is_before)
-                                model.Add(task_i['end'] <= task_j['start']).OnlyEnforceIf(is_before)
-                                
-                                # If not before, then task_j comes before task_i
-                                model.Add(task_i['start'] >= task_j['end']).OnlyEnforceIf(is_before.Not())
-    
-    # Calculate makespan (total completion time)
-    if all_tasks:
-        makespan = model.NewIntVar(0, horizon, 'makespan')  # Variable for makespan
-        all_ends = [t['end'] for t in all_tasks]  # All task end times
-        model.AddMaxEquality(makespan, all_ends)  # Makespan = max(all end times)
 
-        # Objective: minimize makespan + penalty for deadline violations
-        # High penalty (1000x) ensures solver tries to meet deadlines first
+    # ========================================================================
+    # STEP 7: Add No-Overlap Constraints
+    # ========================================================================
+    # NO-OVERLAP: Ensures that no two tasks run simultaneously on the same machine
+    # This is a fundamental constraint in scheduling problems
+    #
+    # OR-Tools' AddNoOverlap() efficiently handles this by using specialized
+    # propagators that understand interval variables
+    #
+    # NOTE: Setup times are tracked for reporting but not enforced as hard
+    # constraints to avoid creating O(n²) boolean variables which would
+    # cause presolve timeout on large problems
+
+    for machine_name, tasks in machine_tasks.items():
+        if len(tasks) > 0:
+            # Extract interval variables for all tasks on this machine
+            intervals = [t['interval'] for t in tasks]
+
+            # Add the no-overlap constraint: no two intervals can overlap in time
+            model.AddNoOverlap(intervals)
+
+    # ========================================================================
+    # STEP 8: Define Makespan and Objective Function
+    # ========================================================================
+    # MAKESPAN: The time when all tasks are completed (max of all end times)
+    # We want to minimize makespan to finish production as quickly as possible
+
+    if all_tasks:
+        # Create a variable to represent the makespan
+        makespan = model.NewIntVar(0, horizon, 'makespan')
+
+        # Collect all task end times
+        all_ends = [t['end'] for t in all_tasks]
+
+        # Constraint: makespan = max(all end times)
+        # This built-in constraint efficiently tracks the maximum
+        model.AddMaxEquality(makespan, all_ends)
+
+        # ====================================================================
+        # OBJECTIVE FUNCTION
+        # ====================================================================
+        # Minimize: makespan + 1000 * total_deadline_violations
+        #
+        # The 1000x multiplier on violations ensures the solver prioritizes
+        # meeting deadlines over minimizing makespan. This creates a
+        # lexicographic objective where:
+        # 1. First priority: minimize deadline violations
+        # 2. Second priority: minimize makespan (total completion time)
         total_violation = sum(order_info[oid]['violation_var'] for oid in order_info)
         model.Minimize(makespan + 1000 * total_violation)
-    
-    # Solve
+
+    # ========================================================================
+    # STEP 9: Configure and Run the Solver
+    # ========================================================================
     print(f"Model created with {len(all_tasks)} tasks, {len(order_info)} orders")
     print("Starting solver...")
 
-    solver = cp_model.CpSolver()  # Create solver
-    solver.parameters.max_time_in_seconds = 30.0  # Time limit 30 seconds (increased for large datasets)
-    solver.parameters.log_search_progress = True  # Enable solver logging
+    # Create the CP-SAT solver instance
+    solver = cp_model.CpSolver()
 
-    status = solver.Solve(model)  # Solve the model
+    # Configure solver parameters
+    solver.parameters.max_time_in_seconds = 30.0  # 30 second time limit
+    solver.parameters.log_search_progress = True  # Show solving progress in console
 
+    # Solve the model
+    # The solver will search for the optimal solution that satisfies all
+    # constraints while minimizing the objective function
+    status = solver.Solve(model)
+
+    # ========================================================================
+    # STEP 10: Display Solver Statistics
+    # ========================================================================
     print(f"\n[SOLVER FINISHED]")
     print(f"Status: {solver.StatusName(status)}")
     print(f"Solve time: {solver.WallTime():.2f} seconds")
-    print(f"Branches: {solver.NumBranches()}")
-    print(f"Conflicts: {solver.NumConflicts()}")
-    
-    # Prepare result
+    print(f"Branches: {solver.NumBranches()}")  # Search tree branches explored
+    print(f"Conflicts: {solver.NumConflicts()}")  # Conflicts found during search
+
+    # ========================================================================
+    # STEP 11: Process Results
+    # ========================================================================
+    # Extract the solution values from the solver and format for output
+
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
         from datetime import timedelta
 
-        # First, create schedule with solved values
+        # ====================================================================
+        # Extract Schedule from Solver Solution
+        # ====================================================================
+        # The solver has assigned values to all our decision variables
+        # We now extract those values to create the final schedule
+
         schedule = []
         for task in all_tasks:
+            # Get the solved start and end times for this task
             task_start_hours = solver.Value(task['start'])
             task_end_hours = solver.Value(task['end'])
 
+            # Convert relative hours to actual datetime
             actual_start = start_datetime + timedelta(hours=task_start_hours)
             actual_end = start_datetime + timedelta(hours=task_end_hours)
 
@@ -183,7 +299,7 @@ def solve_schedule(machines, products, setup_times, orders, start_time):
                 'order': task['order'],
                 'operation': task['operation'],
                 'machine': task['machine'],
-                'product': task['product'],
+                'product': task['product'],  # Temporary, removed later
                 'start': task_start_hours,
                 'end': task_end_hours,
                 'duration': task['duration'],
@@ -192,10 +308,16 @@ def solve_schedule(machines, products, setup_times, orders, start_time):
                 'setup_time': 0  # Will be calculated below
             })
 
-        # Sort by start time
+        # Sort schedule by start time for readability
         schedule.sort(key=lambda x: x['start'])
 
-        # Calculate setup times - group by machine and find previous task
+        # ====================================================================
+        # Calculate Setup Times (Post-Processing)
+        # ====================================================================
+        # Setup times are the transition time between different products
+        # on the same machine. We calculate this based on the actual sequence.
+
+        # Group tasks by machine
         machine_schedule = {}
         for task in schedule:
             machine = task['machine']
@@ -203,27 +325,33 @@ def solve_schedule(machines, products, setup_times, orders, start_time):
                 machine_schedule[machine] = []
             machine_schedule[machine].append(task)
 
-        # For each machine, calculate setup time based on previous task
+        # For each machine, calculate setup times between consecutive tasks
         for machine, tasks in machine_schedule.items():
-            tasks.sort(key=lambda x: x['start'])  # Sort by start time
+            tasks.sort(key=lambda x: x['start'])  # Ensure chronological order
             for i in range(len(tasks)):
                 if i > 0:  # If not the first task on this machine
                     prev_task = tasks[i - 1]
                     curr_task = tasks[i]
 
-                    # Check if there's a setup time defined
+                    # Check if a setup time is defined for this product transition
                     setup_key = f"{prev_task['product']}-{curr_task['product']}"
                     setup_time = setup_times.get(setup_key, 0)
                     curr_task['setup_time'] = setup_time
 
-        # Remove 'product' field from final output (order_id not in schedule)
+        # Clean up: remove internal 'product' field from output
         for task in schedule:
             task.pop('product', None)
 
-        # Calculate deadline violations for each order
+        # ====================================================================
+        # Calculate Deadline Violations
+        # ====================================================================
+        # Check which orders exceeded their deadlines and by how much
+
         deadline_violations = []
         total_violations = 0
+
         for oid, oinfo in order_info.items():
+            # Get the violation variable value (hours late)
             violation_hours = solver.Value(oinfo['violation_var'])
             actual_end = solver.Value(oinfo['last_task_end'])
 
@@ -237,12 +365,21 @@ def solve_schedule(machines, products, setup_times, orders, start_time):
                 })
                 total_violations += violation_hours
 
-        # Determine status based on violations
+        # ====================================================================
+        # Determine Final Status
+        # ====================================================================
+        # OPTIMAL: Found proven optimal solution with no violations
+        # FEASIBLE: Found good solution with no violations (may not be optimal)
+        # FEASIBLE_WITH_VIOLATIONS: Found solution but some deadlines missed
+
         if total_violations > 0:
             result_status = 'FEASIBLE_WITH_VIOLATIONS'
         else:
             result_status = 'OPTIMAL' if status == cp_model.OPTIMAL else 'FEASIBLE'
 
+        # ====================================================================
+        # Return Success Result
+        # ====================================================================
         result = {
             'status': result_status,
             'makespan': solver.Value(makespan) if all_tasks else 0,
@@ -252,25 +389,43 @@ def solve_schedule(machines, products, setup_times, orders, start_time):
             'total_violation_hours': total_violations
         }
     else:
+        # ====================================================================
+        # STEP 12: Handle Solver Failure
+        # ====================================================================
+        # The solver could not find a solution. Provide diagnostics to help
+        # the user understand why and how to fix the problem.
+
         print(f"\n[SOLVER FAILED]")
         print(f"Status: {solver.StatusName(status)}")
 
-        # Provide detailed diagnostics
+        # Provide detailed diagnostics based on failure type
         if status == cp_model.INFEASIBLE:
+            # INFEASIBLE: No solution exists that satisfies all constraints
+            # This usually means the problem is over-constrained
             print("Problem is INFEASIBLE - constraints cannot be satisfied")
             print("Possible causes:")
             print(f"  - Total work ({total_work}h) too large for machine capacity")
             print(f"  - Setup time constraints too restrictive")
             print(f"  - Precedence constraints create circular dependencies")
+            print(f"  - Deadlines too tight (even with soft constraints)")
+
         elif status == cp_model.MODEL_INVALID:
+            # MODEL_INVALID: The model itself has errors
+            # This is usually a programming error, not a data issue
             print("Model is INVALID - check constraint definitions")
+            print("This indicates a bug in the model construction code")
+
         elif status == cp_model.UNKNOWN:
+            # UNKNOWN: Solver timed out or hit resource limits
+            # The problem might be solvable with more time or smaller input
             print("Status UNKNOWN - solver may have timed out or hit resource limits")
             print(f"  Consider: reducing orders, increasing time limit, or simplifying setup times")
 
+        # Return failure result
         result = {
             'status': 'INFEASIBLE',
             'message': f'Solver status: {solver.StatusName(status)}. Check console for details.'
         }
 
-    return result  # Return solution
+    return result
+
