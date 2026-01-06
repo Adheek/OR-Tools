@@ -79,7 +79,7 @@ def solve_schedule(machines, products, setup_times, orders, start_time):
     # ========================================================================
     task_id = 0  # Unique identifier for each task instance
 
-    # Setup time tracking (currently for reporting only, not enforced as constraints)
+    # Track tasks by machine for setup time constraints
     machine_last_product = {m['name']: [] for m in machines}
 
     # ========================================================================
@@ -193,17 +193,13 @@ def solve_schedule(machines, products, setup_times, orders, start_time):
         order_id += 1
 
     # ========================================================================
-    # STEP 7: Add No-Overlap Constraints
+    # STEP 7: Add No-Overlap Constraints with Setup Times
     # ========================================================================
     # NO-OVERLAP: Ensures that no two tasks run simultaneously on the same machine
-    # This is a fundamental constraint in scheduling problems
+    # SETUP TIMES: Add minimum gap between tasks when switching products
     #
-    # OR-Tools' AddNoOverlap() efficiently handles this by using specialized
-    # propagators that understand interval variables
-    #
-    # NOTE: Setup times are tracked for reporting but not enforced as hard
-    # constraints to avoid creating O(n²) boolean variables which would
-    # cause presolve timeout on large problems
+    # Strategy: Use efficient conditional constraints for setup times
+    # Only create constraints for task pairs with non-zero setup times
 
     for machine_name, tasks in machine_tasks.items():
         if len(tasks) > 0:
@@ -212,6 +208,40 @@ def solve_schedule(machines, products, setup_times, orders, start_time):
 
             # Add the no-overlap constraint: no two intervals can overlap in time
             model.AddNoOverlap(intervals)
+
+            # ================================================================
+            # Add Setup Time Constraints (Efficient Method)
+            # ================================================================
+            # For each pair of tasks on the same machine, if they have
+            # different products with a defined setup time, enforce a minimum
+            # gap between them using conditional constraints
+
+            if len(tasks) > 1 and setup_times:
+                for i in range(len(tasks)):
+                    for j in range(i + 1, len(tasks)):  # Only check j > i to reduce constraints
+                        task_i = tasks[i]
+                        task_j = tasks[j]
+
+                        # Check both directions for setup times
+                        setup_key_ij = f"{task_i['product']}-{task_j['product']}"
+                        setup_key_ji = f"{task_j['product']}-{task_i['product']}"
+
+                        setup_time_ij = setup_times.get(setup_key_ij, 0)
+                        setup_time_ji = setup_times.get(setup_key_ji, 0)
+
+                        # Only add constraints if setup time exists
+                        if setup_time_ij > 0:
+                            # If task_i comes before task_j: j.start >= i.end + setup_time_ij
+                            # Create boolean: does task_i precede task_j?
+                            i_before_j = model.NewBoolVar(f'setup_{task_i["id"]}_before_{task_j["id"]}')
+                            model.Add(task_j['start'] >= task_i['end'] + setup_time_ij).OnlyEnforceIf(i_before_j)
+                            model.Add(task_j['start'] < task_i['start']).OnlyEnforceIf(i_before_j.Not())
+
+                        if setup_time_ji > 0 and task_i['product'] != task_j['product']:
+                            # If task_j comes before task_i: i.start >= j.end + setup_time_ji
+                            j_before_i = model.NewBoolVar(f'setup_{task_j["id"]}_before_{task_i["id"]}')
+                            model.Add(task_i['start'] >= task_j['end'] + setup_time_ji).OnlyEnforceIf(j_before_i)
+                            model.Add(task_i['start'] < task_j['start']).OnlyEnforceIf(j_before_i.Not())
 
     # ========================================================================
     # STEP 8: Define Makespan and Objective Function
@@ -253,7 +283,7 @@ def solve_schedule(machines, products, setup_times, orders, start_time):
     solver = cp_model.CpSolver()
 
     # Configure solver parameters
-    solver.parameters.max_time_in_seconds = 30.0  # 30 second time limit
+    solver.parameters.max_time_in_seconds = 60 
     solver.parameters.log_search_progress = True  # Show solving progress in console
 
     # Solve the model
